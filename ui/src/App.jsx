@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import './App.css'
 
 /** 메뉴별 스톡 이미지 URL(표시용) */
@@ -33,6 +33,13 @@ const EXTRA_OPTIONS = [
   { id: 'shot', label: '샷 추가', extra: 500 },
   { id: 'syrup', label: '시럽 추가', extra: 0 },
 ]
+
+/** 주문 상태: 신규는 주문 접수 → 제조 시작 → 제조 중 → 제조 완료 */
+const ORDER_STATUS = {
+  RECEIVED: 'RECEIVED',
+  PREPARING: 'PREPARING',
+  DONE: 'DONE',
+}
 
 function formatWon(value) {
   return `${value.toLocaleString('ko-KR')}원`
@@ -69,18 +76,111 @@ function createEmptySelections() {
   return init
 }
 
-function AdminPlaceholder({ onGoOrder }) {
+function initialInventory() {
+  return Object.fromEntries(MENU_ITEMS.map((m) => [m.id, 10]))
+}
+
+function stockLevelLabel(qty) {
+  if (qty <= 0) return { text: '품절', className: 'stock-out' }
+  if (qty < 5) return { text: '주의', className: 'stock-warn' }
+  return { text: '정상', className: 'stock-ok' }
+}
+
+function formatOrderDateTime(isoString) {
+  const d = new Date(isoString)
+  return d.toLocaleString('ko-KR', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+}
+
+function orderLinesSummary(order) {
+  return order.lines.map((l) => `${l.label} x ${l.qty}`).join(', ')
+}
+
+function orderStatusLabel(status) {
+  if (status === ORDER_STATUS.RECEIVED) return '주문 접수'
+  if (status === ORDER_STATUS.PREPARING) return '제조 중'
+  if (status === ORDER_STATUS.DONE) return '제조 완료'
+  return status
+}
+
+function buildOrderFromCart(cart) {
+  const id = `ord-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+  const lines = cart.map((line) => {
+    const menu = MENU_ITEMS.find((m) => m.id === line.menuId)
+    const label = menu ? cartLineDescription(menu, line.selection) : line.menuId
+    return {
+      key: line.key,
+      menuId: line.menuId,
+      selection: { ...line.selection },
+      qty: line.qty,
+      unitPrice: line.unitPrice,
+      label,
+    }
+  })
+  const total = cart.reduce((sum, line) => sum + line.unitPrice * line.qty, 0)
+  return {
+    id,
+    createdAt: new Date().toISOString(),
+    lines,
+    total,
+    status: ORDER_STATUS.RECEIVED,
+  }
+}
+
+function canFulfillCart(cart, inventory) {
+  const need = {}
+  for (const line of cart) {
+    need[line.menuId] = (need[line.menuId] || 0) + line.qty
+  }
+  for (const [menuId, qty] of Object.entries(need)) {
+    if ((inventory[menuId] ?? 0) < qty) return false
+  }
+  return true
+}
+
+function inventoryAfterDeduction(cart, inventory) {
+  const next = { ...inventory }
+  for (const line of cart) {
+    next[line.menuId] = (next[line.menuId] ?? 0) - line.qty
+  }
+  return next
+}
+
+function AppHeader({ active, onGoOrder, onGoAdmin }) {
   return (
-    <div className="page-placeholder">
-      <p>관리자 화면은 이후 단계에서 구현됩니다.</p>
-      <button type="button" className="btn btn-primary" onClick={onGoOrder}>
-        주문하기로 돌아가기
-      </button>
-    </div>
+    <header className="app-header">
+      <span className="brand">COZY</span>
+      <nav className="nav-tabs" aria-label="주요 메뉴">
+        {active === 'order' ? (
+          <span className="nav-tab nav-tab-active" aria-current="page">
+            주문하기
+          </span>
+        ) : (
+          <button type="button" className="nav-tab nav-tab-link" onClick={onGoOrder}>
+            주문하기
+          </button>
+        )}
+        {active === 'admin' ? (
+          <span className="nav-tab nav-tab-active" aria-current="page">
+            관리자
+          </span>
+        ) : (
+          <button type="button" className="nav-tab nav-tab-link" onClick={onGoAdmin}>
+            관리자
+          </button>
+        )}
+      </nav>
+    </header>
   )
 }
 
-function OrderPage({ onGoAdmin }) {
+function OrderPage({ onGoAdmin, onPlaceOrder }) {
   const [selections, setSelections] = useState(createEmptySelections)
   const [cart, setCart] = useState([])
 
@@ -123,23 +223,13 @@ function OrderPage({ onGoAdmin }) {
 
   function placeOrder() {
     if (cart.length === 0) return
-    window.alert('주문이 접수되었습니다. (데모)')
-    setCart([])
+    const ok = onPlaceOrder(cart)
+    if (ok) setCart([])
   }
 
   return (
     <>
-      <header className="app-header">
-        <span className="brand">COZY</span>
-        <nav className="nav-tabs" aria-label="주요 메뉴">
-          <span className="nav-tab nav-tab-active" aria-current="page">
-            주문하기
-          </span>
-          <button type="button" className="nav-tab nav-tab-link" onClick={onGoAdmin}>
-            관리자
-          </button>
-        </nav>
-      </header>
+      <AppHeader active="order" onGoOrder={() => {}} onGoAdmin={onGoAdmin} />
 
       <main className="order-main">
         <section className="menu-section" aria-labelledby="menu-heading">
@@ -261,31 +351,195 @@ function OrderPage({ onGoAdmin }) {
   )
 }
 
+function AdminPage({ onGoOrder, orders, onAdvanceOrder, inventory, onAdjustStock }) {
+  const totalCount = orders.length
+  const receivedCount = orders.filter((o) => o.status === ORDER_STATUS.RECEIVED).length
+  const preparingCount = orders.filter((o) => o.status === ORDER_STATUS.PREPARING).length
+  const doneCount = orders.filter((o) => o.status === ORDER_STATUS.DONE).length
+
+  const sortedOrders = useMemo(
+    () => [...orders].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
+    [orders],
+  )
+
+  return (
+    <>
+      <AppHeader active="admin" onGoOrder={onGoOrder} onGoAdmin={() => {}} />
+
+      <main className="admin-main">
+        <section className="admin-section" aria-labelledby="dash-heading">
+          <h2 id="dash-heading" className="admin-section-title">
+            관리자 대시보드
+          </h2>
+          <div className="admin-dashboard-grid">
+            <section className="admin-stat-box" aria-labelledby="stat-total">
+              <h3 id="stat-total" className="admin-stat-label">
+                총 주문
+              </h3>
+              <p className="admin-stat-value">{totalCount}</p>
+            </section>
+            <section className="admin-stat-box" aria-labelledby="stat-received">
+              <h3 id="stat-received" className="admin-stat-label">
+                주문 접수
+              </h3>
+              <p className="admin-stat-value">{receivedCount}</p>
+            </section>
+            <section className="admin-stat-box" aria-labelledby="stat-preparing">
+              <h3 id="stat-preparing" className="admin-stat-label">
+                제조 중
+              </h3>
+              <p className="admin-stat-value">{preparingCount}</p>
+            </section>
+            <section className="admin-stat-box" aria-labelledby="stat-done">
+              <h3 id="stat-done" className="admin-stat-label">
+                제조 완료
+              </h3>
+              <p className="admin-stat-value">{doneCount}</p>
+            </section>
+          </div>
+        </section>
+
+        <section className="admin-section" aria-labelledby="inv-heading">
+          <h2 id="inv-heading" className="admin-section-title">
+            재고 현황
+          </h2>
+          <ul className="admin-inventory-grid">
+            {MENU_ITEMS.map((item) => {
+              const qty = inventory[item.id] ?? 0
+              const level = stockLevelLabel(qty)
+              return (
+                <li key={item.id} className="admin-inv-card">
+                  <p className="admin-inv-name">{item.name}</p>
+                  <p className="admin-inv-qty">
+                    <strong>{qty}</strong>개
+                  </p>
+                  <p className={`stock-status ${level.className}`}>{level.text}</p>
+                  <div className="admin-inv-actions">
+                    <button
+                      type="button"
+                      className="btn btn-qty"
+                      aria-label={`${item.name} 재고 줄이기`}
+                      onClick={() => onAdjustStock(item.id, -1)}
+                      disabled={qty <= 0}
+                    >
+                      −
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-qty"
+                      aria-label={`${item.name} 재고 늘리기`}
+                      onClick={() => onAdjustStock(item.id, 1)}
+                    >
+                      +
+                    </button>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        </section>
+
+        <section className="admin-section" aria-labelledby="orders-heading">
+          <h2 id="orders-heading" className="admin-section-title">
+            주문 현황
+          </h2>
+          {sortedOrders.length === 0 ? (
+            <p className="admin-orders-empty">접수된 주문이 없습니다.</p>
+          ) : (
+            <ul className="admin-orders-list">
+              {sortedOrders.map((order) => (
+                <li key={order.id} className="admin-order-row">
+                  <div className="admin-order-meta">
+                    <time dateTime={order.createdAt}>{formatOrderDateTime(order.createdAt)}</time>
+                    <span className="admin-order-status">{orderStatusLabel(order.status)}</span>
+                  </div>
+                  <p className="admin-order-lines">{orderLinesSummary(order)}</p>
+                  <p className="admin-order-total">{formatWon(order.total)}</p>
+                  <div className="admin-order-action">
+                    {order.status === ORDER_STATUS.RECEIVED && (
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm"
+                        onClick={() => onAdvanceOrder(order.id)}
+                      >
+                        제조 시작
+                      </button>
+                    )}
+                    {order.status === ORDER_STATUS.PREPARING && (
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm"
+                        onClick={() => onAdvanceOrder(order.id)}
+                      >
+                        제조 완료
+                      </button>
+                    )}
+                    {order.status === ORDER_STATUS.DONE && (
+                      <span className="admin-order-done">처리 완료</span>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      </main>
+    </>
+  )
+}
+
 export default function App() {
   const [screen, setScreen] = useState('order')
+  const [orders, setOrders] = useState([])
+  const [inventory, setInventory] = useState(initialInventory)
+
+  const handlePlaceOrder = useCallback((cart) => {
+    if (!canFulfillCart(cart, inventory)) {
+      window.alert('재고가 부족하여 주문할 수 없습니다. 재고를 확인해 주세요.')
+      return false
+    }
+    const order = buildOrderFromCart(cart)
+    setOrders((prev) => [order, ...prev])
+    setInventory((prev) => inventoryAfterDeduction(cart, prev))
+    window.alert('주문이 접수되었습니다.')
+    return true
+  }, [inventory])
+
+  const handleAdvanceOrder = useCallback((orderId) => {
+    setOrders((prev) =>
+      prev.map((o) => {
+        if (o.id !== orderId) return o
+        if (o.status === ORDER_STATUS.RECEIVED) return { ...o, status: ORDER_STATUS.PREPARING }
+        if (o.status === ORDER_STATUS.PREPARING) return { ...o, status: ORDER_STATUS.DONE }
+        return o
+      }),
+    )
+  }, [])
+
+  const handleAdjustStock = useCallback((menuId, delta) => {
+    setInventory((prev) => ({
+      ...prev,
+      [menuId]: Math.max(0, (prev[menuId] ?? 0) + delta),
+    }))
+  }, [])
 
   if (screen === 'admin') {
     return (
       <div className="app">
-        <header className="app-header">
-          <span className="brand">COZY</span>
-          <nav className="nav-tabs" aria-label="주요 메뉴">
-            <button type="button" className="nav-tab nav-tab-link" onClick={() => setScreen('order')}>
-              주문하기
-            </button>
-            <span className="nav-tab nav-tab-active" aria-current="page">
-              관리자
-            </span>
-          </nav>
-        </header>
-        <AdminPlaceholder onGoOrder={() => setScreen('order')} />
+        <AdminPage
+          onGoOrder={() => setScreen('order')}
+          orders={orders}
+          onAdvanceOrder={handleAdvanceOrder}
+          inventory={inventory}
+          onAdjustStock={handleAdjustStock}
+        />
       </div>
     )
   }
 
   return (
     <div className="app">
-      <OrderPage onGoAdmin={() => setScreen('admin')} />
+      <OrderPage onGoAdmin={() => setScreen('admin')} onPlaceOrder={handlePlaceOrder} />
     </div>
   )
 }
