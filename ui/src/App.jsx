@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import './App.css'
 
 /** 메뉴별 스톡 이미지 URL(표시용) */
@@ -150,6 +150,32 @@ function inventoryAfterDeduction(cart, inventory) {
     next[line.menuId] = (next[line.menuId] ?? 0) - line.qty
   }
   return next
+}
+
+/** 주문 성공·재고 부족 등 — `alert` 대신 인라인 토스트 */
+function ToastBanner({ toast, onDismiss }) {
+  if (!toast) return null
+  const isError = toast.type === 'error'
+  return (
+    <div className="toast-container">
+      <div
+        className={`toast-banner toast-banner--${toast.type}`}
+        role={isError ? 'alert' : 'status'}
+        aria-live={isError ? 'assertive' : 'polite'}
+        aria-atomic="true"
+      >
+        <p className="toast-banner__text">{toast.message}</p>
+        <button
+          type="button"
+          className="toast-banner__close"
+          onClick={onDismiss}
+          aria-label="알림 닫기"
+        >
+          닫기
+        </button>
+      </div>
+    </div>
+  )
 }
 
 function AppHeader({ active, onGoOrder, onGoAdmin }) {
@@ -492,16 +518,28 @@ export default function App() {
   const [screen, setScreen] = useState('order')
   const [orders, setOrders] = useState([])
   const [inventory, setInventory] = useState(initialInventory)
+  const [toast, setToast] = useState(null)
+
+  const dismissToast = useCallback(() => setToast(null), [])
+
+  useEffect(() => {
+    if (!toast) return undefined
+    const id = window.setTimeout(() => setToast(null), 5200)
+    return () => window.clearTimeout(id)
+  }, [toast])
 
   const handlePlaceOrder = useCallback((cart) => {
     if (!canFulfillCart(cart, inventory)) {
-      window.alert('재고가 부족하여 주문할 수 없습니다. 재고를 확인해 주세요.')
+      setToast({
+        type: 'error',
+        message: '재고가 부족하여 주문할 수 없습니다. 재고를 확인해 주세요.',
+      })
       return false
     }
     const order = buildOrderFromCart(cart)
     setOrders((prev) => [order, ...prev])
     setInventory((prev) => inventoryAfterDeduction(cart, prev))
-    window.alert('주문이 접수되었습니다.')
+    setToast({ type: 'success', message: '주문이 접수되었습니다.' })
     return true
   }, [inventory])
 
@@ -523,9 +561,10 @@ export default function App() {
     }))
   }, [])
 
-  if (screen === 'admin') {
-    return (
-      <div className="app">
+  return (
+    <div className="app">
+      <ToastBanner toast={toast} onDismiss={dismissToast} />
+      {screen === 'admin' ? (
         <AdminPage
           onGoOrder={() => setScreen('order')}
           orders={orders}
@@ -533,13 +572,9 @@ export default function App() {
           inventory={inventory}
           onAdjustStock={handleAdjustStock}
         />
-      </div>
-    )
-  }
-
-  return (
-    <div className="app">
-      <OrderPage onGoAdmin={() => setScreen('admin')} onPlaceOrder={handlePlaceOrder} />
+      ) : (
+        <OrderPage onGoAdmin={() => setScreen('admin')} onPlaceOrder={handlePlaceOrder} />
+      )}
     </div>
   )
 }
