@@ -40,8 +40,8 @@ app.get('/health/db', async (_req, res) => {
   }
 })
 
-const server = app.listen(PORT, '127.0.0.1', () => {
-  console.log(`Server listening at http://127.0.0.1:${PORT}`)
+const server = app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`)
 })
 
 async function shutdown(signal) {
